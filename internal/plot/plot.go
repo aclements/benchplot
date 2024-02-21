@@ -1,0 +1,309 @@
+// Copyright 2024 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package plot
+
+import (
+	"cmp"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"golang.org/x/perf/benchfmt"
+	"golang.org/x/perf/benchproc"
+)
+
+// TODO: Do something with the residue. Probably complain if two points we're
+// averaging have different residues, much like benchstat does.
+
+type Plot struct {
+	// aes is the projection for each aesthetic dimension.
+	aes aesMap[projection]
+
+	// unitAes is the aesthetic the unit (.unit) is bound to, if any.
+	unitAes Aes
+	// unitField is the field of unitAes's projection the unit is bound to.
+	unitField *benchproc.Field
+	// dvAes is the aesthetic the dependent variable (.value) is bound to, if any.
+	dvAes Aes
+
+	// kinds is the intersection of value kinds across all points for a given
+	// aesthetic dimension.
+	kinds aesMap[valueKinds]
+
+	// logScale is the log base for each aesthetic, or 0 for linear.
+	logScale aesMap[int]
+
+	points []point
+}
+
+// A projection describes how to map from a [benchfmt.Result] to a value. The
+// zero value maps all Results to the zero value.
+type projection struct {
+	iv        *benchproc.Projection
+	ivField   *benchproc.Field // set if iv has exactly one field
+	unitField *benchproc.Field // set if iv has a .unit field
+
+	dv bool
+}
+
+type value struct {
+	kinds valueKinds
+	key   benchproc.Key // if kinds & kindDiscrete
+	val   float64       // if kinds & kindContinuous
+}
+
+type valueKinds uint8
+
+const (
+	kindDiscrete valueKinds = 1 << iota
+	kindContinuous
+
+	kindAll = kindDiscrete | kindContinuous
+)
+
+type point struct {
+	aesMap[value]
+}
+
+func NewPlot(c *Config) (*Plot, error) {
+	// Find unit and DV.
+	unitAes, dvAes := aesNone, aesNone
+	var unitField *benchproc.Field
+	for aes := range aesMax {
+		proj := c.aes.Get(aes)
+		if proj.unitField != nil {
+			if unitAes != aesNone {
+				return nil, fmt.Errorf("at most one dimension may show .unit")
+			}
+			unitAes, unitField = aes, proj.unitField
+		}
+		if proj.dv {
+			if dvAes != aesNone {
+				return nil, fmt.Errorf("at most one dimension may show .value")
+			}
+			dvAes = aes
+		}
+	}
+	// If we have a unit field, then we also need a DV.
+	if unitAes != aesNone && dvAes == aesNone {
+		return nil, fmt.Errorf(".unit is mapped to the %s dimension, but no dimension shows .value", unitAes.Name())
+	}
+	if unitAes == aesNone && dvAes != aesNone {
+		return nil, fmt.Errorf(".value is mapped to the %s dimension, but no dimension shows .unit", dvAes.Name())
+	}
+
+	var kinds aesMap[valueKinds]
+	for i := range aesMax {
+		kinds.Set(i, kindAll)
+	}
+	return &Plot{
+		aes:       c.aes.Copy(),
+		unitAes:   unitAes,
+		unitField: unitField,
+		dvAes:     dvAes,
+		kinds:     kinds,
+		logScale:  c.logScale,
+	}, nil
+}
+
+func (p projection) project(r *benchfmt.Result) []value {
+	if p.dv {
+		panic("cannot project DV")
+	}
+	if p.iv == nil {
+		return []value{{kinds: kindDiscrete}}
+	}
+
+	var values []value
+	if p.unitField != nil {
+		for _, key := range p.iv.ProjectValues(r) {
+			values = append(values, value{kinds: kindDiscrete, key: key})
+		}
+	} else {
+		key := p.iv.Project(r)
+		values = append(values, value{kinds: kindDiscrete, key: key})
+	}
+
+	// Try to parse continuous values, too.
+	if p.ivField != nil {
+		for i, val := range values {
+			s := val.key.Get(p.ivField)
+			val, err := strconv.ParseFloat(s, 64)
+			if err == nil {
+				values[i].kinds |= kindContinuous
+				values[i].val = val
+			}
+		}
+	}
+
+	return values
+}
+
+func (p projection) String() string {
+	if p.dv {
+		return ".value"
+	}
+	if p.iv != nil {
+		var out strings.Builder
+		for i, field := range p.iv.FlattenedFields() {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			out.WriteString(field.String())
+		}
+		return out.String()
+	}
+	return "<nil>"
+}
+
+func (v value) String() string {
+	if v.kinds&kindDiscrete != 0 {
+		return v.key.String()
+	}
+	return fmt.Sprint(v.val)
+}
+
+func (v value) compare(v2 value) int {
+	if !v.key.IsZero() {
+		return compareKeys(v.key, v2.key)
+	}
+	return cmp.Compare(v.val, v2.val)
+}
+
+func (p *Plot) Label(pt point, aes Aes) string {
+	proj := p.aes.Get(aes)
+	if proj.dv {
+		return pt.Get(p.unitAes).key.Get(p.unitField)
+	}
+	return proj.String()
+}
+
+func (p *Plot) Add(rec *benchfmt.Result) {
+	var pt point
+	var fill func(aes Aes)
+	fill = func(aes Aes) {
+		if aes == aesMax {
+			// Add the point.
+			p.points = append(p.points, point{pt.aesMap.Copy()})
+			// Update the plot kind sets.
+			for i := range aesMax {
+				kinds := p.kinds.Get(i)
+				p.kinds.Set(i, kinds&pt.aesMap.Get(i).kinds)
+			}
+			return
+		}
+
+		proj := p.aes.Get(aes)
+		if proj.dv {
+			// We fill this in when we find the .unit projection.
+			fill(aes + 1)
+			return
+		}
+		// TODO: This is usually a single element slice, making this pretty
+		// inefficient.
+		vals := proj.project(rec)
+		for _, val := range vals {
+			if proj.unitField != nil {
+				unitName := val.key.Get(proj.unitField)
+				val, ok := rec.Value(unitName)
+				if !ok {
+					// Point is missing this unit. Just drop the point.
+					continue
+				}
+				pt.aesMap.Set(p.dvAes, value{kinds: kindContinuous, val: val})
+			}
+			pt.aesMap.Set(aes, val)
+			fill(aes + 1)
+		}
+	}
+	fill(0)
+}
+
+// ordScale returns an ordinal scale from aes to [0, bound).
+func (p *Plot) ordScale(aes Aes) (scale func(value) int, bound int) {
+	if p.kinds.Get(aes)&kindDiscrete != 0 {
+		// Collect all unique values.
+		vals := make(map[benchproc.Key]struct{})
+		for _, pt := range p.points {
+			vals[pt.Get(aes).key] = struct{}{}
+		}
+		ord := make(map[benchproc.Key]int)
+		for i, k := range sortedKeys(vals) {
+			ord[k] = i
+		}
+		return func(v value) int {
+			if idx, ok := ord[v.key]; ok {
+				return idx
+			}
+			panic("value has unmapped key")
+		}, len(ord)
+	}
+
+	if p.kinds.Get(aes)&kindContinuous != 0 {
+		// Collect all unique values.
+		set := make(map[float64]struct{})
+		var sl []float64
+		for _, pt := range p.points {
+			val := pt.Get(aes).val
+			if _, ok := set[val]; !ok {
+				set[val] = struct{}{}
+				sl = append(sl, val)
+			}
+		}
+		sort.Float64s(sl)
+
+		ord := make(map[float64]int)
+		for i, k := range sl {
+			ord[k] = i
+		}
+		return func(v value) int {
+			if idx, ok := ord[v.val]; ok {
+				return idx
+			}
+			panic("value has unmapped key")
+		}, len(ord)
+	}
+
+	panic(aes.Name() + " is neither discrete nor continuous")
+}
+
+func compareKeys(a, b benchproc.Key) int {
+	// TODO: Key should have a Compare method
+	if a == b {
+		return 0
+	}
+	if a.Less(b) {
+		return -1
+	}
+	return 1
+}
+
+func sortedKeys(set map[benchproc.Key]struct{}) []benchproc.Key {
+	sl := make([]benchproc.Key, 0, len(set))
+	for k := range set {
+		sl = append(sl, k)
+	}
+	benchproc.SortKeys(sl)
+	return sl
+}
+
+// sliceBy divides slice s into subslices by equal values of grouper.
+func sliceBy[T any, U comparable](s []T, grouper func(T) U, doGroup func(U, []T)) {
+	if len(s) == 0 {
+		return
+	}
+
+	start := 0
+	startVal := grouper(s[0])
+	for i := 1; i < len(s); i++ {
+		val := grouper(s[i])
+		if val != startVal {
+			doGroup(startVal, s[start:i])
+			start, startVal = i, val
+		}
+	}
+	doGroup(startVal, s[start:])
+}
