@@ -7,7 +7,6 @@ package plot
 import (
 	"cmp"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -28,10 +27,6 @@ type Plot struct {
 	unitField *benchproc.Field
 	// dvAes is the aesthetic the dependent variable (.value) is bound to, if any.
 	dvAes Aes
-
-	// kinds is the intersection of value kinds across all points for a given
-	// aesthetic dimension.
-	kinds aesMap[valueKinds]
 
 	// logScale is the log base for each aesthetic, or 0 for linear.
 	logScale aesMap[int]
@@ -95,16 +90,11 @@ func NewPlot(c *Config) (*Plot, error) {
 		return nil, fmt.Errorf(".value is mapped to the %s dimension, but no dimension shows .unit", dvAes.Name())
 	}
 
-	var kinds aesMap[valueKinds]
-	for i := range aesMax {
-		kinds.Set(i, kindAll)
-	}
 	return &Plot{
 		aes:       c.aes.Copy(),
 		unitAes:   unitAes,
 		unitField: unitField,
 		dvAes:     dvAes,
-		kinds:     kinds,
 		logScale:  c.logScale,
 	}, nil
 }
@@ -188,11 +178,6 @@ func (p *Plot) Add(rec *benchfmt.Result) {
 		if aes == aesMax {
 			// Add the point.
 			p.points = append(p.points, point{pt.aesMap.Copy()})
-			// Update the plot kind sets.
-			for i := range aesMax {
-				kinds := p.kinds.Get(i)
-				p.kinds.Set(i, kinds&pt.aesMap.Get(i).kinds)
-			}
 			return
 		}
 
@@ -220,54 +205,6 @@ func (p *Plot) Add(rec *benchfmt.Result) {
 		}
 	}
 	fill(0)
-}
-
-// ordScale returns an ordinal scale from aes to [0, bound).
-func (p *Plot) ordScale(aes Aes) (scale func(value) int, bound int) {
-	if p.kinds.Get(aes)&kindDiscrete != 0 {
-		// Collect all unique values.
-		vals := make(map[benchproc.Key]struct{})
-		for _, pt := range p.points {
-			vals[pt.Get(aes).key] = struct{}{}
-		}
-		ord := make(map[benchproc.Key]int)
-		for i, k := range sortedKeys(vals) {
-			ord[k] = i
-		}
-		return func(v value) int {
-			if idx, ok := ord[v.key]; ok {
-				return idx
-			}
-			panic("value has unmapped key")
-		}, len(ord)
-	}
-
-	if p.kinds.Get(aes)&kindContinuous != 0 {
-		// Collect all unique values.
-		set := make(map[float64]struct{})
-		var sl []float64
-		for _, pt := range p.points {
-			val := pt.Get(aes).val
-			if _, ok := set[val]; !ok {
-				set[val] = struct{}{}
-				sl = append(sl, val)
-			}
-		}
-		sort.Float64s(sl)
-
-		ord := make(map[float64]int)
-		for i, k := range sl {
-			ord[k] = i
-		}
-		return func(v value) int {
-			if idx, ok := ord[v.val]; ok {
-				return idx
-			}
-			panic("value has unmapped key")
-		}, len(ord)
-	}
-
-	panic(aes.Name() + " is neither discrete nor continuous")
 }
 
 func compareKeys(a, b benchproc.Key) int {
@@ -306,4 +243,33 @@ func sliceBy[T any, U comparable](s []T, grouper func(T) U, doGroup func(U, []T)
 		}
 	}
 	doGroup(startVal, s[start:])
+}
+
+// groupBy groups the elements of s according to the value of grouper. It
+// maintains the order of elements. If possible, it uses subslices of s, but it
+// will copy out of s if grouper returns the same value for discontinuous ranges
+// of s.
+func groupBy[T any, U comparable](s []T, grouper func(T) U) map[U][]T {
+	out := make(map[U][]T)
+	if len(s) == 0 {
+		return out
+	}
+
+	start := 0
+	startVal := grouper(s[0])
+	for i := 1; i < len(s); i++ {
+		val := grouper(s[i])
+		if val != startVal || i == len(s)-1 {
+			if old, ok := out[startVal]; !ok {
+				// Use subslice directly.
+				out[startVal] = s[start:i]
+			} else {
+				// Copy slice.
+				out[startVal] = append(old[:len(old):len(old)], s[start:i]...)
+			}
+			start, startVal = i, val
+		}
+	}
+
+	return out
 }

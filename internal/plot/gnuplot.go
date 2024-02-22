@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"golang.org/x/perf/benchmath"
-	"golang.org/x/perf/benchunit"
 )
 
 type gnuplotter struct {
@@ -21,7 +20,7 @@ type gnuplotter struct {
 	code strings.Builder
 
 	confidence float64
-	colorScale func(value) int
+	colorScale func(point) int
 }
 
 func (p *Plot) GnuplotCode() (string, error) {
@@ -29,24 +28,25 @@ func (p *Plot) GnuplotCode() (string, error) {
 }
 
 func (p *gnuplotter) plot() (string, error) {
+	pts := p.points
 	p.confidence = 0.95
 
-	if len(p.points) == 0 {
+	if len(pts) == 0 {
 		return "", fmt.Errorf("no data")
 	}
 
-	if p.kinds.Get(AesX)&kindContinuous == 0 {
+	if pointsKinds(pts, AesX)&kindContinuous == 0 {
 		// TODO: Bar chart
 		return "", fmt.Errorf("non-numeric X data not supported")
 	}
-	if p.kinds.Get(AesY)&kindContinuous == 0 {
+	if pointsKinds(pts, AesY)&kindContinuous == 0 {
 		// TODO: Horizontal bar chart?
 		return "", fmt.Errorf("non-numeric Y data not supported")
 	}
-	_, nRows := p.ordScale(AesRow)
-	_, nCols := p.ordScale(AesCol)
+	rowScale, nRows := ordScale(pts, AesRow)
+	colScale, nCols := ordScale(pts, AesCol)
 	multiplot := nRows > 1 || nCols > 1
-	p.colorScale, _ = p.ordScale(AesColor)
+	p.colorScale, _ = ordScale(pts, AesColor)
 
 	if multiplot {
 		// Configure multiplot
@@ -78,14 +78,15 @@ func (p *gnuplotter) plot() (string, error) {
 	})
 
 	// Emit plots
-	pts := p.points
-	sliceBy(pts, pointAesGetter(AesCol),
-		func(col value, pts []point) {
-			sliceBy(pts, pointAesGetter(AesRow),
-				func(row value, pts []point) {
-					p.onePlot(pts)
-				})
-		})
+	type rowCol struct{ row, col int }
+	plots := groupBy(pts, func(pt point) rowCol {
+		return rowCol{rowScale(pt), colScale(pt)}
+	})
+	for col := range nCols {
+		for row := range nRows {
+			p.onePlot(plots[rowCol{row, col}])
+		}
+	}
 
 	if multiplot {
 		fmt.Fprintf(&p.code, "unset multiplot\n")
@@ -101,42 +102,19 @@ func pointAesGetter(aes Aes) func(pt point) value {
 }
 
 func (p *gnuplotter) onePlot(pts []point) {
-	var unitName string
-	if p.unitField != nil {
-		// TODO: What happens if, say, -color is configured to .unit? Then it
-		// won't be consistent across pts. But it also pretty unclear what to do
-		// with, say, -color .unit -y .value. What do we label the Y axis? It
-		// probably has to be some combination of the units.
-		unitName = pts[0].Get(p.unitAes).key.Get(p.unitField)
+	if len(pts) == 0 {
+		// Skip this plot.
+		fmt.Fprintf(&p.code, "set multiplot next\n")
+		return
 	}
 
 	// Scale the values
-	//
-	// TODO: This could result in some weird looking units. Ideally benchunit
-	// would have something that could say "this unit's base quantity is time
-	// (and thus base unit is seconds)", allowing us to scale and represent it,
-	// though then we'd probably need to compute out own tick marks.
-	scaler := func(aes Aes) benchunit.Scaler {
-		projection := p.aes.Get(aes)
-		if !projection.dv || unitName == "" {
-			return benchunit.NoOpScaler
-		}
-
-		cls := benchunit.ClassOf(unitName)
-
-		var vals []float64
-		for _, pt := range p.points {
-			vals = append(vals, pt.Get(aes).val)
-		}
-
-		return benchunit.CommonScale(vals, cls)
-	}
-	xScaler := scaler(AesX)
-	yScaler := scaler(AesY)
+	xScale, _, _, xLabel, _ := p.continuousScale(pts, AesX)
+	yScale, _, _, yLabel, _ := p.continuousScale(pts, AesY)
 
 	// Set axis labels
-	fmt.Fprintf(&p.code, "set xlabel %s\n", gpString(xScaler.Prefix+p.Label(pts[0], AesX)))
-	fmt.Fprintf(&p.code, "set ylabel %s\n", gpString(yScaler.Prefix+p.Label(pts[0], AesY)))
+	fmt.Fprintf(&p.code, "set xlabel %s\n", gpString(xLabel))
+	fmt.Fprintf(&p.code, "set ylabel %s\n", gpString(yLabel))
 
 	// Emit point data and build plot command
 	var plotArgs []string
@@ -150,22 +128,27 @@ func (p *gnuplotter) onePlot(pts []point) {
 	anyRange := false
 	sliceBy(pts, pointAesGetter(AesColor),
 		func(color value, pts []point) {
-			colorIdx := p.colorScale(color)
+			colorIdx := p.colorScale(pts[0])
 
 			// Construct points on this curve
 			plotPoints = plotPoints[:0]
 			haveRange := false
 			sliceBy(pts, pointAesGetter(AesX),
 				func(x value, pts []point) {
-					// TODO: Do something with the warnings. Allow configuring confidence.
+					// TODO: Do something with the warnings. Allow configuring
+					// confidence.
+					//
+					// TODO: Another way to model this would be to add "summary"
+					// as a value type and have a general transformation to
+					// summarize on a given aesthetic.
 					ys = ys[:0]
-					for _, p := range pts {
-						ys = append(ys, p.Get(AesY).val)
+					for _, pt := range pts {
+						ys = append(ys, yScale(pt))
 					}
 					sample := benchmath.NewSample(ys, &benchmath.DefaultThresholds)
 					summary := benchmath.AssumeNothing.Summary(sample, p.confidence)
 
-					plotPoints = append(plotPoints, plotPoint{x.val, summary})
+					plotPoints = append(plotPoints, plotPoint{xScale(pts[0]), summary})
 					if !math.IsInf(summary.Lo, 0) {
 						haveRange = true
 					}
@@ -178,7 +161,7 @@ func (p *gnuplotter) onePlot(pts []point) {
 
 				for _, pt := range plotPoints {
 					if !math.IsInf(pt.y.Lo, 0) {
-						fmt.Fprintf(&data, "%g %g %g\n", pt.x/xScaler.Factor, pt.y.Lo/yScaler.Factor, pt.y.Hi/yScaler.Factor)
+						fmt.Fprintf(&data, "%g %g %g\n", pt.x, pt.y.Lo, pt.y.Hi)
 					}
 				}
 				fmt.Fprintf(&data, "e\n")
@@ -189,7 +172,7 @@ func (p *gnuplotter) onePlot(pts []point) {
 			plotArg := fmt.Sprintf("'-' using 1:2 with lp title %s linecolor %d", gpString(color.key.StringValues()), colorIdx)
 			plotArgs = append(plotArgs, plotArg)
 			for _, pt := range plotPoints {
-				fmt.Fprintf(&data, "%g %g\n", pt.x/xScaler.Factor, pt.y.Center/yScaler.Factor)
+				fmt.Fprintf(&data, "%g %g\n", pt.x, pt.y.Center)
 			}
 			fmt.Fprintf(&data, "e\n")
 
