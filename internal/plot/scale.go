@@ -71,7 +71,7 @@ func ordScale(pts []point, aes Aes) (scale func(point) int, bound int) {
 	panic(aes.Name() + " is neither discrete nor continuous")
 }
 
-func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(float64) float64, lo, hi float64, label string, err error) {
+func (p *Plot) continuousScale(pts []point, aes Aes, rescale bool) (scale func(float64) float64, lo, hi float64, label string, err error) {
 	if pointsKinds(pts, aes)&kindContinuous == 0 {
 		err = fmt.Errorf("%s data must be numeric", aes.Name())
 		return
@@ -126,18 +126,28 @@ func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(float64) float6
 		unitNames = append(unitNames, n)
 	}
 
-	// Get unit class.
-	cls := benchunit.Decimal
-	if len(unitNames) == 1 {
-		cls = benchunit.ClassOf(unitNames[0])
-	}
+	prefix := ""
+	if rescale {
+		// Get unit class.
+		cls := benchunit.Decimal
+		if len(unitNames) == 1 {
+			cls = benchunit.ClassOf(unitNames[0])
+		}
 
-	// Construct scaler. We pass only the highest value. Otherwise this will try
-	// to pick a scale that keeps precision for the *smallest* value, which
-	// isn't what you want on an axis.
-	scaler := benchunit.CommonScale([]float64{hi}, cls)
-	scale = func(v float64) float64 {
-		return v / scaler.Factor
+		// Construct scaler. We pass only the highest value. Otherwise this will try
+		// to pick a scale that keeps precision for the *smallest* value, which
+		// isn't what you want on an axis.
+		scaler := benchunit.CommonScale([]float64{hi}, cls)
+		scale = func(v float64) float64 {
+			return v / scaler.Factor
+		}
+		prefix = scaler.Prefix
+	} else {
+		// The caller has requested that we not rescale values (probably because
+		// the plotter it's talking to has that ability).
+		scale = func(v float64) float64 {
+			return v
+		}
 	}
 
 	// Construct label.
@@ -148,7 +158,7 @@ func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(float64) float6
 	// though then we'd probably need to compute out own tick marks.
 	labels := make([]string, 0, 1)
 	for _, n := range unitNames {
-		labels = append(labels, scaler.Prefix+n)
+		labels = append(labels, prefix+n)
 	}
 	label = strings.Join(labels, ", ")
 

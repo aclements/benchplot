@@ -108,6 +108,12 @@ func (p *gnuplotter) plot(term string) error {
 	setLogScale(AesX, "x")
 	setLogScale(AesY, "y")
 
+	// Let gnuplot print scientific values on tick marks. This is much nicer
+	// than putting it on the unit.
+	//
+	// TODO: If the unit class is Binary, use %b%B.
+	fmt.Fprintf(&p.code, "set format xy '%%.0s%%c'\n")
+
 	// Sort the points in the order the data must be emitted.
 	slices.SortFunc(pts, func(a, b point) int {
 		if c := a.Get(AesCol).compare(b.Get(AesCol)); c != 0 {
@@ -170,11 +176,10 @@ func (p *gnuplotter) onePlot(pts []point) {
 		return
 	}
 
-	// Scale the values.
-	//
-	// TODO: Instead, use set format xy "%s %S"
-	xScale, _, _, xLabel, _ := p.continuousScale(pts, AesX)
-	yScale, _, _, yLabel, _ := p.continuousScale(pts, AesY)
+	// Scale the values. We ask for no rescaling because we've configured
+	// gnuplot to do the scientific scaling for us.
+	xScale, _, _, xLabel, _ := p.continuousScale(pts, AesX, false)
+	yScale, _, _, yLabel, _ := p.continuousScale(pts, AesY, false)
 
 	// Set axis labels
 	fmt.Fprintf(&p.code, "set xlabel %s\n", gpString(xLabel))
