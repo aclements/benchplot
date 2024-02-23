@@ -160,6 +160,13 @@ func (v value) String() string {
 	return fmt.Sprint(v.val)
 }
 
+func (v value) StringValues() string {
+	if v.kinds&kindDiscrete != 0 {
+		return v.key.StringValues()
+	}
+	return fmt.Sprint(v.val)
+}
+
 func (v value) compare(v2 value) int {
 	if !v.key.IsZero() {
 		return compareKeys(v.key, v2.key)

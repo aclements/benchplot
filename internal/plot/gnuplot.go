@@ -5,9 +5,13 @@
 package plot
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
+	"io"
 	"math"
+	"os"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,40 +19,84 @@ import (
 
 type gnuplotter struct {
 	*Plot
-	code strings.Builder
+	code bytes.Buffer
 
 	confidence float64
 	colorScale func(point) int
 }
 
-func (p *Plot) GnuplotCode() (string, error) {
-	return (&gnuplotter{Plot: p}).plot()
+func (p *Plot) Gnuplot(term string, out io.Writer) error {
+	pl := gnuplotter{Plot: p}
+	if err := pl.plot(term); err != nil {
+		return err
+	}
+
+	// TODO: Only do this if we're launching a windowed gnuplot
+	if false {
+		fmt.Fprintf(&pl.code, "pause mouse close\n")
+	}
+	code := pl.code.Bytes()
+
+	switch term {
+	case "":
+		_, err := out.Write(code)
+		return err
+	case "png":
+		cmd := exec.Command("gnuplot")
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("creating pipe to gnuplot: %w", err)
+		}
+		cmd.Stdout = out
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("starting gnuplot: %w", err)
+		}
+		defer cmd.Process.Kill()
+		if _, err := stdin.Write(code); err != nil {
+			return fmt.Errorf("writing to gnuplot: %w", err)
+		}
+		stdin.Close()
+		if err := cmd.Wait(); err != nil {
+			return fmt.Errorf("gnuplot failed: %w", err)
+		}
+	}
+	return nil
 }
 
-func (p *gnuplotter) plot() (string, error) {
+func (p *gnuplotter) plot(term string) error {
 	pts := p.points
 	p.confidence = 0.95
 
 	if len(pts) == 0 {
-		return "", fmt.Errorf("no data")
+		return fmt.Errorf("no data")
 	}
 
 	if pointsKinds(pts, AesX)&kindContinuous == 0 {
 		// TODO: Bar chart
-		return "", fmt.Errorf("non-numeric X data not supported")
+		return fmt.Errorf("non-numeric X data not supported")
 	}
 	if pointsKinds(pts, AesY)&kindContinuous == 0 {
 		// TODO: Horizontal bar chart?
-		return "", fmt.Errorf("non-numeric Y data not supported")
+		return fmt.Errorf("non-numeric Y data not supported")
 	}
 	rowScale, nRows := ordScale(pts, AesRow)
 	colScale, nCols := ordScale(pts, AesCol)
 	multiplot := nRows > 1 || nCols > 1
 	p.colorScale, _ = ordScale(pts, AesColor)
 
+	switch term {
+	case "":
+		// Just code
+	case "png":
+		fmt.Fprintf(&p.code, "set terminal pngcairo size %d,%d\n", nCols*640, nRows*480)
+	default:
+		return fmt.Errorf("unknown output type %s", term)
+	}
+
 	if multiplot {
 		// Configure multiplot
-		fmt.Fprintf(&p.code, "set multiplot layout %d,%d columnsfirst\n", nRows, nCols)
+		fmt.Fprintf(&p.code, "set multiplot layout %d,%d columnsfirst margins char 12,1.0,char 4,char 2 spacing char 10, char 4\n", nRows, nCols)
 	}
 
 	// Set log scales
@@ -82,7 +130,23 @@ func (p *gnuplotter) plot() (string, error) {
 	})
 	for col := range nCols {
 		for row := range nRows {
-			p.onePlot(plots[rowCol{row, col}])
+			pts := plots[rowCol{row, col}]
+			if multiplot && col == 0 && len(pts) > 0 {
+				// Label this row.
+				//
+				// TODO: This won't work if there are no points in this plot.
+				// Maybe I need an inverse scale?
+				label := pts[0].Get(AesRow).StringValues()
+				fmt.Fprintf(&p.code, "set label 1 %s at char 2, graph 0.5 center rotate by 90\n", gpString(label))
+			}
+			if multiplot && row == 0 && len(pts) > 0 {
+				// Label this column.
+				label := pts[0].Get(AesCol).StringValues()
+				fmt.Fprintf(&p.code, "set title %s\n", gpString(label))
+			}
+			p.onePlot(pts)
+			fmt.Fprintf(&p.code, "unset label 1\n")
+			fmt.Fprintf(&p.code, "unset title\n")
 		}
 	}
 
@@ -90,7 +154,7 @@ func (p *gnuplotter) plot() (string, error) {
 		fmt.Fprintf(&p.code, "unset multiplot\n")
 	}
 
-	return p.code.String(), nil
+	return nil
 }
 
 func pointAesGetter(aes Aes) func(pt point) value {
@@ -106,7 +170,9 @@ func (p *gnuplotter) onePlot(pts []point) {
 		return
 	}
 
-	// Scale the values
+	// Scale the values.
+	//
+	// TODO: Instead, use set format xy "%s %S"
 	xScale, _, _, xLabel, _ := p.continuousScale(pts, AesX)
 	yScale, _, _, yLabel, _ := p.continuousScale(pts, AesY)
 

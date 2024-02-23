@@ -98,16 +98,13 @@ func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(float64) float6
 		return
 	}
 
-	// Get values and units.
+	// Get units.
 	//
 	// We can wind up with multiple units if, say, -color is configured to
 	// .unit. In that case, we combine all of the units.
-	var vals []float64
 	unitNames := make([]string, 0, 1)
 	var unitSet map[string]struct{} // Lazily initialized.
 	for i, pt := range pts {
-		vals = append(vals, pt.Get(aes).val)
-
 		n := pt.Get(p.unitAes).key.Get(p.unitField)
 		if i == 0 {
 			unitNames = append(unitNames, n)
@@ -135,8 +132,10 @@ func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(float64) float6
 		cls = benchunit.ClassOf(unitNames[0])
 	}
 
-	// Construct scaler.
-	scaler := benchunit.CommonScale(vals, cls)
+	// Construct scaler. We pass only the highest value. Otherwise this will try
+	// to pick a scale that keeps precision for the *smallest* value, which
+	// isn't what you want on an axis.
+	scaler := benchunit.CommonScale([]float64{hi}, cls)
 	scale = func(v float64) float64 {
 		return v / scaler.Factor
 	}

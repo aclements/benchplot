@@ -263,11 +263,17 @@ In addition, any projection may be one of the following:
 		fmt.Fprintf(wErr, "%d records did not match -filter, %d records did not match -unit\n", nFiltered, nUnitFiltered)
 	}
 
-	code, err := plot.GnuplotCode()
+	//code, err := plot.GnuplotCode()
+	f, err := os.Create("benchplot.png")
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(w, code)
+	defer f.Close()
+	err = plot.Gnuplot("png", f)
+	if err != nil {
+		return err
+	}
+	//fmt.Fprint(w, code)
 	return nil
 }
 
