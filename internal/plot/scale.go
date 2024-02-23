@@ -6,10 +6,8 @@ package plot
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
-	"golang.org/x/perf/benchproc"
 	"golang.org/x/perf/benchunit"
 )
 
@@ -21,54 +19,32 @@ func pointsKinds(pts []point, aes Aes) valueKinds {
 	return kinds
 }
 
+func valuesKinds(values []value) valueKinds {
+	kinds := kindAll
+	for _, value := range values {
+		kinds &= value.kinds
+	}
+	return kinds
+}
+
 // ordScale returns an ordinal scale from aes to [0, bound).
 func ordScale(pts []point, aes Aes) (scale func(point) int, bound int) {
-	kinds := pointsKinds(pts, aes)
-
-	if kinds&kindDiscrete != 0 {
-		// Collect all unique values.
-		vals := make(map[benchproc.Key]struct{})
-		for _, pt := range pts {
-			vals[pt.Get(aes).key] = struct{}{}
-		}
-		ord := make(map[benchproc.Key]int)
-		for i, k := range sortedKeys(vals) {
-			ord[k] = i
-		}
-		return func(pt point) int {
-			if idx, ok := ord[pt.Get(aes).key]; ok {
-				return idx
-			}
-			panic("value has unmapped key")
-		}, len(ord)
+	// Collect all unique values.
+	vals := make(map[value]struct{})
+	for _, pt := range pts {
+		vals[pt.Get(aes)] = struct{}{}
 	}
-
-	if kinds&kindContinuous != 0 {
-		// Collect all unique values.
-		set := make(map[float64]struct{})
-		var sl []float64
-		for _, pt := range pts {
-			val := pt.Get(aes).val
-			if _, ok := set[val]; !ok {
-				set[val] = struct{}{}
-				sl = append(sl, val)
-			}
-		}
-		sort.Float64s(sl)
-
-		ord := make(map[float64]int)
-		for i, k := range sl {
-			ord[k] = i
-		}
-		return func(pt point) int {
-			if idx, ok := ord[pt.Get(aes).val]; ok {
-				return idx
-			}
-			panic("value has unmapped key")
-		}, len(ord)
+	// Create a mapping index.
+	ord := make(map[value]int)
+	for i, k := range sortedValues(vals) {
+		ord[k] = i
 	}
-
-	panic(aes.Name() + " is neither discrete nor continuous")
+	return func(pt point) int {
+		if idx, ok := ord[pt.Get(aes)]; ok {
+			return idx
+		}
+		panic("value has unmapped key")
+	}, len(ord)
 }
 
 func (p *Plot) continuousScale(pts []point, aes Aes, rescale bool) (scale func(float64) float64, lo, hi float64, label string, err error) {

@@ -7,6 +7,7 @@ package plot
 import (
 	"cmp"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -51,6 +52,7 @@ type value struct {
 	val   float64       // if kinds & kindContinuous
 
 	summary *benchmath.Summary // if kinds & kindSummary
+	denom   benchproc.Key      // if kindRatio AND kindDiscrete
 }
 
 type valueKinds uint8
@@ -59,8 +61,11 @@ const (
 	kindDiscrete valueKinds = 1 << iota
 	kindContinuous
 	kindSummary // Implies kindContinuous
+	kindRatio   // Implies kindContinuous OR kindDiscrete
 
-	kindAll = kindDiscrete | kindContinuous
+	kindMax
+
+	kindAll = kindMax - 1
 )
 
 type point struct {
@@ -155,6 +160,9 @@ func (p projection) String() string {
 
 func (v value) String() string {
 	if v.kinds&kindDiscrete != 0 {
+		if v.kinds&kindRatio != 0 {
+			return v.key.String() + " vs " + v.denom.String()
+		}
 		return v.key.String()
 	}
 	return fmt.Sprint(v.val)
@@ -162,16 +170,38 @@ func (v value) String() string {
 
 func (v value) StringValues() string {
 	if v.kinds&kindDiscrete != 0 {
+		if v.kinds&kindRatio != 0 {
+			return v.key.StringValues() + " vs " + v.denom.StringValues()
+		}
 		return v.key.StringValues()
 	}
 	return fmt.Sprint(v.val)
 }
 
 func (v value) compare(v2 value) int {
-	if !v.key.IsZero() {
-		return compareKeys(v.key, v2.key)
+	if v.kinds&v2.kinds&kindDiscrete != 0 {
+		if c := compareKeys(v.key, v2.key); c != 0 {
+			return c
+		}
+		if v.kinds&kindRatio != 0 {
+			return compareKeys(v.denom, v2.denom)
+		}
+		return 0
 	}
-	return cmp.Compare(v.val, v2.val)
+	if v.kinds&v2.kinds&kindContinuous != 0 {
+		return cmp.Compare(v.val, v2.val)
+	}
+	// Otherwise, put them in kind order.
+	for kind := range kindMax {
+		if v.kinds&kind != 0 && v2.kinds&kind == 0 {
+			return -1
+		}
+		if v.kinds&kind == 0 && v2.kinds&kind != 0 {
+			return 1
+		}
+	}
+	// Something went very wrong.
+	panic(fmt.Errorf("incomparable kinds %#x, %#x", v.kinds, v2.kinds))
 }
 
 func (p *Plot) Label(pt point, aes Aes) string {
@@ -235,6 +265,19 @@ func sortedKeys(set map[benchproc.Key]struct{}) []benchproc.Key {
 		sl = append(sl, k)
 	}
 	benchproc.SortKeys(sl)
+	return sl
+}
+
+func sortedValues(set map[value]struct{}) []value {
+	sl := make([]value, 0, len(set))
+	for v := range set {
+		sl = append(sl, v)
+	}
+
+	slices.SortFunc(sl, func(a, b value) int {
+		return a.compare(b)
+	})
+
 	return sl
 }
 

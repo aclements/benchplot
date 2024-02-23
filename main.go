@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -36,6 +37,16 @@ var aesFlags = []aesFlag{
 	{plot.AesColor, ".residue", "map values of `projection` to color"},
 	{plot.AesRow, ".unit", "map values of `projection` to facet rows"},
 	{plot.AesCol, "", "map values of `projection` to facet columns"},
+}
+
+type transformOpt struct {
+	doc string
+	do  func(p *plot.Plot) error
+}
+
+var transformOpts = map[string]transformOpt{
+	"compare": {"normalize each value against the first value at the same X",
+		(*plot.Plot).TransformCompare},
 }
 
 func benchplot(w, wErr io.Writer, args []string) error {
@@ -72,6 +83,17 @@ In addition, any projection may be one of the following:
   .value   The value of the metric corresponding to .unit
   .residue All fields that were not in some other projection
 `)
+
+		// Print transforms.
+		fmt.Fprintf(wErr, "\nTransformations:\n")
+		var names []string
+		for name := range transformOpts {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			fmt.Fprintf(wErr, "  %s\n    \t%s\n", name, transformOpts[name].doc)
+		}
 	}
 
 	// Register aesthetic flags.
@@ -99,6 +121,7 @@ In addition, any projection may be one of the following:
 	// it's usually this.
 	flagUnits := mainFlagSet.String("unit", "", "comma-separated list of `units` to show")
 	flagLogScale := mainFlagSet.String("log-scale", "", "comma-separated `list` of options to plot on a log scale\nUse name:base to set a log base other than 10")
+	flagTransform := mainFlagSet.String("transform", "", "comma-separated `list` of data transformations")
 
 	// Merge flag sets.
 	mergeFlags := func(dst, src *flag.FlagSet) {
@@ -203,10 +226,22 @@ In addition, any projection may be one of the following:
 
 	}
 
+	// Parse transforms.
+	var transforms []func(p *plot.Plot) error
+	if *flagTransform != "" {
+		for _, opt := range strings.Split(*flagTransform, ",") {
+			t, ok := transformOpts[opt]
+			if !ok {
+				return fmt.Errorf("unknown transform %s", opt)
+			}
+			transforms = append(transforms, t.do)
+		}
+	}
+
 	// Read inputs.
 	var errors []errorAt
 	var nParsed, nFiltered, nUnitFiltered int
-	plot, err := plot.NewPlot(config)
+	pl, err := plot.NewPlot(config)
 	if err != nil {
 		return err
 	}
@@ -242,7 +277,7 @@ In addition, any projection may be one of the following:
 				}
 			}
 
-			plot.Add(rec)
+			pl.Add(rec)
 		}
 	}
 	if err := files.Err(); err != nil {
@@ -263,13 +298,20 @@ In addition, any projection may be one of the following:
 		fmt.Fprintf(wErr, "%d records did not match -filter, %d records did not match -unit\n", nFiltered, nUnitFiltered)
 	}
 
+	// Apply transforms.
+	for _, transform := range transforms {
+		if err := transform(pl); err != nil {
+			return err
+		}
+	}
+
 	//code, err := plot.GnuplotCode()
 	f, err := os.Create("benchplot.png")
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	err = plot.Gnuplot("png", f)
+	err = pl.Gnuplot("png", f)
 	if err != nil {
 		return err
 	}

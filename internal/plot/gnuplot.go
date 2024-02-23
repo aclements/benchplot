@@ -108,12 +108,6 @@ func (p *gnuplotter) plot(term string) error {
 	setLogScale(AesX, "x")
 	setLogScale(AesY, "y")
 
-	// Let gnuplot print scientific values on tick marks. This is much nicer
-	// than putting it on the unit.
-	//
-	// TODO: If the unit class is Binary, use %b%B.
-	fmt.Fprintf(&p.code, "set format xy '%%.0s%%c'\n")
-
 	// Sort the points in the order the data must be emitted.
 	slices.SortFunc(pts, func(a, b point) int {
 		if c := a.Get(AesCol).compare(b.Get(AesCol)); c != 0 {
@@ -176,10 +170,35 @@ func (p *gnuplotter) onePlot(pts []point) {
 		return
 	}
 
-	// Scale the values. We ask for no rescaling because we've configured
-	// gnuplot to do the scientific scaling for us.
-	xScale, _, _, xLabel, _ := p.continuousScale(pts, AesX, false)
-	yScale, _, _, yLabel, _ := p.continuousScale(pts, AesY, false)
+	// Let gnuplot print scientific values on tick marks. This is much nicer
+	// than putting it on the unit.
+	//
+	// TODO: If the unit class is Binary, use %b%B.
+	setFormat := func(axis string, aes Aes) (scale func(float64) float64, label string) {
+		kinds := pointsKinds(pts, aes)
+		// Scale the values. We ask for no rescaling because we'll configure
+		// gnuplot to do the scientific scaling for us.
+		scale, _, _, label, _ = p.continuousScale(pts, aes, false)
+		if kinds&kindRatio != 0 {
+			// Format ratios as a percent delta.
+			fmt.Fprintf(&p.code, "set format %s '%%+h%%%%'\n", axis)
+			scale = func(x float64) float64 { return (x - 1) * 100 }
+			label = "delta " + label
+			// Always include 0.
+			fmt.Fprintf(&p.code, "set %srange [*<0:0<*]\n", axis)
+			// Draw a line at 0. The command uses the opposite axis.
+			za := "x"
+			if aes == AesX {
+				za = "y"
+			}
+			fmt.Fprintf(&p.code, "set %szeroaxis dt 2\n", za)
+		} else {
+			fmt.Fprintf(&p.code, "set format %s '%%.0s%%c'\n", axis)
+		}
+		return
+	}
+	xScale, xLabel := setFormat("x", AesX)
+	yScale, yLabel := setFormat("y", AesY)
 
 	// Set axis labels
 	fmt.Fprintf(&p.code, "set xlabel %s\n", gpString(xLabel))
@@ -223,7 +242,7 @@ func (p *gnuplotter) onePlot(pts []point) {
 			}
 
 			// Emit center curve.
-			plotArg := fmt.Sprintf("'-' using 1:2 with lp title %s linecolor %d", gpString(color.key.StringValues()), colorIdx)
+			plotArg := fmt.Sprintf("'-' using 1:2 with lp title %s linecolor %d", gpString(color.StringValues()), colorIdx)
 			plotArgs = append(plotArgs, plotArg)
 			for _, pt := range pts {
 				fmt.Fprintf(&data, "%g %g\n", xScale(pt.Get(AesX).val), yScale(pt.Get(AesY).val))
