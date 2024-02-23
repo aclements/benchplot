@@ -11,8 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"golang.org/x/perf/benchmath"
 )
 
 type gnuplotter struct {
@@ -63,7 +61,7 @@ func (p *gnuplotter) plot() (string, error) {
 	setLogScale(AesY, "y")
 
 	// Sort the points in the order the data must be emitted.
-	slices.SortFunc(p.points, func(a, b point) int {
+	slices.SortFunc(pts, func(a, b point) int {
 		if c := a.Get(AesCol).compare(b.Get(AesCol)); c != 0 {
 			return c
 		}
@@ -79,7 +77,7 @@ func (p *gnuplotter) plot() (string, error) {
 
 	// Emit plots
 	type rowCol struct{ row, col int }
-	plots := groupBy(pts, func(pt point) rowCol {
+	plots, _ := groupBy(pts, func(pt point) rowCol {
 		return rowCol{rowScale(pt), colScale(pt)}
 	})
 	for col := range nCols {
@@ -119,64 +117,47 @@ func (p *gnuplotter) onePlot(pts []point) {
 	// Emit point data and build plot command
 	var plotArgs []string
 	var data strings.Builder
-	type plotPoint struct {
-		x float64
-		y benchmath.Summary
-	}
-	var plotPoints []plotPoint // Scratch slice
-	var ys []float64           // Scratch slice
 	anyRange := false
 	sliceBy(pts, pointAesGetter(AesColor),
 		func(color value, pts []point) {
-			colorIdx := p.colorScale(pts[0])
+			colorIdx := p.colorScale(pts[0]) + 1
 
-			// Construct points on this curve
-			plotPoints = plotPoints[:0]
+			// TODO: Should this be done up front? Then continuousScale would
+			// have to understand summaries, but that's fine.
+			pts, _ = transformSummarize(pts, AesY, p.confidence)
+
+			// TODO: Do something with the warnings. Allow configuring
+			// confidence.
 			haveRange := false
-			sliceBy(pts, pointAesGetter(AesX),
-				func(x value, pts []point) {
-					// TODO: Do something with the warnings. Allow configuring
-					// confidence.
-					//
-					// TODO: Another way to model this would be to add "summary"
-					// as a value type and have a general transformation to
-					// summarize on a given aesthetic.
-					ys = ys[:0]
-					for _, pt := range pts {
-						ys = append(ys, yScale(pt))
-					}
-					sample := benchmath.NewSample(ys, &benchmath.DefaultThresholds)
-					summary := benchmath.AssumeNothing.Summary(sample, p.confidence)
-
-					plotPoints = append(plotPoints, plotPoint{xScale(pts[0]), summary})
-					if !math.IsInf(summary.Lo, 0) {
-						haveRange = true
-					}
-				})
+			for _, pt := range pts {
+				if !math.IsInf(pt.Get(AesY).summary.Lo, 0) {
+					haveRange, anyRange = true, true
+					break
+				}
+			}
 
 			// Emit range
 			if haveRange {
 				plotArg := fmt.Sprintf("'-' using 1:2:3 with filledcurves title '' fc linetype %d fs transparent solid 0.25", colorIdx)
 				plotArgs = append(plotArgs, plotArg)
 
-				for _, pt := range plotPoints {
-					if !math.IsInf(pt.y.Lo, 0) {
-						fmt.Fprintf(&data, "%g %g %g\n", pt.x, pt.y.Lo, pt.y.Hi)
+				for _, pt := range pts {
+					x := pt.Get(AesX).val
+					y := pt.Get(AesY).summary
+					if !math.IsInf(y.Lo, 0) {
+						fmt.Fprintf(&data, "%g %g %g\n", xScale(x), yScale(y.Lo), yScale(y.Hi))
 					}
 				}
 				fmt.Fprintf(&data, "e\n")
-				anyRange = true
 			}
 
 			// Emit center curve.
 			plotArg := fmt.Sprintf("'-' using 1:2 with lp title %s linecolor %d", gpString(color.key.StringValues()), colorIdx)
 			plotArgs = append(plotArgs, plotArg)
-			for _, pt := range plotPoints {
-				fmt.Fprintf(&data, "%g %g\n", pt.x, pt.y.Center)
+			for _, pt := range pts {
+				fmt.Fprintf(&data, "%g %g\n", xScale(pt.Get(AesX).val), yScale(pt.Get(AesY).val))
 			}
 			fmt.Fprintf(&data, "e\n")
-
-			colorIdx++
 		})
 
 	if anyRange {

@@ -71,7 +71,7 @@ func ordScale(pts []point, aes Aes) (scale func(point) int, bound int) {
 	panic(aes.Name() + " is neither discrete nor continuous")
 }
 
-func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(point) float64, lo, hi float64, label string, err error) {
+func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(float64) float64, lo, hi float64, label string, err error) {
 	if pointsKinds(pts, aes)&kindContinuous == 0 {
 		err = fmt.Errorf("%s data must be numeric", aes.Name())
 		return
@@ -92,8 +92,8 @@ func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(point) float64,
 	if len(pts) == 0 || !projection.dv {
 		// No-op scale.
 		label = projection.String()
-		scale = func(p point) float64 {
-			return p.Get(aes).val
+		scale = func(v float64) float64 {
+			return v
 		}
 		return
 	}
@@ -137,8 +137,8 @@ func (p *Plot) continuousScale(pts []point, aes Aes) (scale func(point) float64,
 
 	// Construct scaler.
 	scaler := benchunit.CommonScale(vals, cls)
-	scale = func(pt point) float64 {
-		return pt.Get(aes).val / scaler.Factor
+	scale = func(v float64) float64 {
+		return v / scaler.Factor
 	}
 
 	// Construct label.

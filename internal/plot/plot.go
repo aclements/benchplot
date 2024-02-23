@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"golang.org/x/perf/benchfmt"
+	"golang.org/x/perf/benchmath"
 	"golang.org/x/perf/benchproc"
 )
 
@@ -48,6 +49,8 @@ type value struct {
 	kinds valueKinds
 	key   benchproc.Key // if kinds & kindDiscrete
 	val   float64       // if kinds & kindContinuous
+
+	summary *benchmath.Summary // if kinds & kindSummary
 }
 
 type valueKinds uint8
@@ -55,6 +58,7 @@ type valueKinds uint8
 const (
 	kindDiscrete valueKinds = 1 << iota
 	kindContinuous
+	kindSummary // Implies kindContinuous
 
 	kindAll = kindDiscrete | kindContinuous
 )
@@ -249,12 +253,13 @@ func sliceBy[T any, U comparable](s []T, grouper func(T) U, doGroup func(U, []T)
 // maintains the order of elements. If possible, it uses subslices of s, but it
 // will copy out of s if grouper returns the same value for discontinuous ranges
 // of s.
-func groupBy[T any, U comparable](s []T, grouper func(T) U) map[U][]T {
+func groupBy[T any, U comparable](s []T, grouper func(T) U) (map[U][]T, []U) {
 	out := make(map[U][]T)
 	if len(s) == 0 {
-		return out
+		return out, nil
 	}
 
+	var keys []U
 	start := 0
 	startVal := grouper(s[0])
 	for i := 1; i < len(s); i++ {
@@ -263,6 +268,7 @@ func groupBy[T any, U comparable](s []T, grouper func(T) U) map[U][]T {
 			if old, ok := out[startVal]; !ok {
 				// Use subslice directly.
 				out[startVal] = s[start:i]
+				keys = append(keys, startVal)
 			} else {
 				// Copy slice.
 				out[startVal] = append(old[:len(old):len(old)], s[start:i]...)
@@ -271,5 +277,5 @@ func groupBy[T any, U comparable](s []T, grouper func(T) U) map[U][]T {
 		}
 	}
 
-	return out
+	return out, keys
 }
