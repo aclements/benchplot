@@ -184,27 +184,10 @@ func (p *gnuplotter) onePlot(pts []point) {
 			fmt.Fprintf(&p.code, "set format %s '%%+h%%%%'\n", axis)
 			scale = func(x float64) float64 { return (x - 1) * 100 }
 			label = "delta " + label
+
 			// Always include 0.
 			fmt.Fprintf(&p.code, "set %srange [*<0:0<*]\n", axis)
 
-			// If possible, shade better/worse in green/red.
-			//
-			// TODO: It would be more visually representative to just color
-			// between the curve and zero. See https://stackoverflow.com/questions/49874218/gnuplot-fill-area-under-curve-alternatively
-			if aes == AesY && aes == p.dvAes {
-				unitName := pts[0].Get(p.unitAes).key.Get(p.unitField)
-				better := p.units.GetBetter(unitName)
-				pos, neg := "red", "green"
-				if better > 0 {
-					pos, neg = neg, pos
-				}
-				if better != 0 {
-					fmt.Fprintf(&p.code, "set object 1 rectangle from graph 0, first 0 to graph 1, graph 1 back fs transparent solid 0.1 fc '%s' lw 0\n", pos)
-					fmt.Fprintf(&p.code, "set object 2 rectangle from graph 0, graph 0 to graph 1, first 0 back fs transparent solid 0.1 fc '%s' lw 0\n", neg)
-					fmt.Fprintf(&reset, "unset object 1\nunset object 2\n")
-					return
-				}
-			}
 			// Draw a line at 0. The command uses the opposite axis.
 			za := "x"
 			if aes == AesX {
@@ -225,51 +208,105 @@ func (p *gnuplotter) onePlot(pts []point) {
 	fmt.Fprintf(&p.code, "set xlabel %s\n", gpString(xLabel))
 	fmt.Fprintf(&p.code, "set ylabel %s\n", gpString(yLabel))
 
-	// Emit point data and build plot command
+	// TODO: Should this be done up front? Then continuousScale would
+	// have to understand summaries, but that's fine.
+	//
+	// TODO: Do something with the warnings. Allow configuring
+	// confidence.
+	pts, _ = transformSummarize(pts, AesY, p.confidence)
+
+	// Set up for plotting ratios.
+	kinds := pointsKinds(pts, AesY)
+	var ratioPos, ratioNeg string
+	if p.dvAes == AesY && kinds&kindRatio != 0 {
+		// Check that all units have the same "better" direction.
+		better := 0
+		for i, unitName := range p.pointsUnits(pts) {
+			better1 := p.units.GetBetter(unitName)
+			if i == 0 {
+				better = better1
+			} else if better != better1 {
+				better = 0
+				break
+			}
+		}
+
+		if better > 0 {
+			ratioPos, ratioNeg = "red", "green"
+		} else if better < 0 {
+			ratioPos, ratioNeg = "green", "red"
+		}
+	}
+
+	// Emit point data and build plot command. We build this up in several layers.
+	const (
+		layerPos = iota
+		layerNeg
+		layerRange
+		layerCenter
+		maxLayers
+	)
 	var plotArgs []string
 	var data strings.Builder
 	anyRange := false
-	sliceBy(pts, pointAesGetter(AesColor),
-		func(color value, pts []point) {
-			colorIdx := p.colorScale(pts[0]) + 1
+	for layer := range maxLayers {
+		sliceBy(pts, pointAesGetter(AesColor),
+			func(color value, pts []point) {
+				colorIdx := p.colorScale(pts[0]) + 1
 
-			// TODO: Should this be done up front? Then continuousScale would
-			// have to understand summaries, but that's fine.
-			pts, _ = transformSummarize(pts, AesY, p.confidence)
-
-			// TODO: Do something with the warnings. Allow configuring
-			// confidence.
-			haveRange := false
-			for _, pt := range pts {
-				if !math.IsInf(pt.Get(AesY).summary.Lo, 0) {
-					haveRange, anyRange = true, true
-					break
-				}
-			}
-
-			// Emit range
-			if haveRange {
-				plotArg := fmt.Sprintf("'-' using 1:2:3 with filledcurves title '' fc linetype %d fs transparent solid 0.25", colorIdx)
-				plotArgs = append(plotArgs, plotArg)
-
-				for _, pt := range pts {
-					x := pt.Get(AesX).val
-					y := pt.Get(AesY).summary
-					if !math.IsInf(y.Lo, 0) {
-						fmt.Fprintf(&data, "%g %g %g\n", xScale(x), yScale(y.Lo), yScale(y.Hi))
+				if layer == layerRange {
+					haveRange := false
+					for _, pt := range pts {
+						if !math.IsInf(pt.Get(AesY).summary.Lo, 0) {
+							haveRange, anyRange = true, true
+							break
+						}
 					}
+					if !haveRange {
+						return
+					}
+
+					// Emit range
+					plotArg := fmt.Sprintf("'-' using 1:2:3 with filledcurves title '' fc linetype %d fs transparent solid 0.25", colorIdx)
+					plotArgs = append(plotArgs, plotArg)
+
+					for _, pt := range pts {
+						x := pt.Get(AesX).val
+						y := pt.Get(AesY).summary
+						if !math.IsInf(y.Lo, 0) {
+							fmt.Fprintf(&data, "%g %g %g\n", xScale(x), yScale(y.Lo), yScale(y.Hi))
+						}
+					}
+					fmt.Fprintf(&data, "e\n")
+					return
+				}
+
+				// The other layers all use the same data and just different
+				// plot options.
+				plotArg := "'-' using 1:2"
+				switch layer {
+				case layerPos:
+					if ratioPos == "" {
+						return
+					}
+					plotArg += " with filledcurves below fs transparent solid 0.1 fc '" + ratioPos + "' lw 0"
+				case layerNeg:
+					if ratioNeg == "" {
+						return
+					}
+					plotArg += " with filledcurves above fs transparent solid 0.1 fc '" + ratioNeg + "' lw 0"
+				case layerCenter:
+					plotArg += fmt.Sprintf(" with lp title %s linecolor %d", gpString(color.StringValues()), colorIdx)
+				}
+
+				// Emit center curve.
+				plotArgs = append(plotArgs, plotArg)
+				for _, pt := range pts {
+					fmt.Fprintf(&data, "%g %g\n", xScale(pt.Get(AesX).val), yScale(pt.Get(AesY).val))
 				}
 				fmt.Fprintf(&data, "e\n")
-			}
-
-			// Emit center curve.
-			plotArg := fmt.Sprintf("'-' using 1:2 with lp title %s linecolor %d", gpString(color.StringValues()), colorIdx)
-			plotArgs = append(plotArgs, plotArg)
-			for _, pt := range pts {
-				fmt.Fprintf(&data, "%g %g\n", xScale(pt.Get(AesX).val), yScale(pt.Get(AesY).val))
-			}
-			fmt.Fprintf(&data, "e\n")
-		})
+			})
+	}
 
 	if anyRange {
 		// Add a legend entry for the range.

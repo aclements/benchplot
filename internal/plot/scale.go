@@ -27,6 +27,40 @@ func valuesKinds(values []value) valueKinds {
 	return kinds
 }
 
+// pointsUnits returns the distinct units in pts. It returns nil if pts is empty
+// or there is no unit field.
+func (p *Plot) pointsUnits(pts []point) []string {
+	if len(pts) == 0 || p.unitField == nil {
+		return nil
+	}
+
+	unitNames := make([]string, 0, 1)
+	var unitSet map[string]struct{} // Lazily initialized.
+	for i, pt := range pts {
+		n := pt.Get(p.unitAes).key.Get(p.unitField)
+		if i == 0 {
+			unitNames = append(unitNames, n)
+			continue
+		}
+		if n == unitNames[0] {
+			continue
+		}
+		// Tricky case: there are multiple units
+		if unitSet == nil {
+			// Lazily initialize the set.
+			unitSet = make(map[string]struct{})
+			unitSet[unitNames[0]] = struct{}{}
+		}
+		if _, ok := unitSet[n]; ok {
+			continue
+		}
+		unitSet[n] = struct{}{}
+		unitNames = append(unitNames, n)
+	}
+
+	return unitNames
+}
+
 // ordScale returns an ordinal scale from aes to [0, bound).
 func ordScale(pts []point, aes Aes) (scale func(point) int, bound int) {
 	// Collect all unique values.
@@ -78,29 +112,7 @@ func (p *Plot) continuousScale(pts []point, aes Aes, rescale bool) (scale func(f
 	//
 	// We can wind up with multiple units if, say, -color is configured to
 	// .unit. In that case, we combine all of the units.
-	unitNames := make([]string, 0, 1)
-	var unitSet map[string]struct{} // Lazily initialized.
-	for i, pt := range pts {
-		n := pt.Get(p.unitAes).key.Get(p.unitField)
-		if i == 0 {
-			unitNames = append(unitNames, n)
-			continue
-		}
-		if n == unitNames[0] {
-			continue
-		}
-		// Tricky case: there are multiple units
-		if unitSet == nil {
-			// Lazily initialize the set.
-			unitSet = make(map[string]struct{})
-			unitSet[unitNames[0]] = struct{}{}
-		}
-		if _, ok := unitSet[n]; ok {
-			continue
-		}
-		unitSet[n] = struct{}{}
-		unitNames = append(unitNames, n)
-	}
+	unitNames := p.pointsUnits(pts)
 
 	prefix := ""
 	if rescale {
