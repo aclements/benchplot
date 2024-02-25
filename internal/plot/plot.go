@@ -33,6 +33,8 @@ type Plot struct {
 	// logScale is the log base for each aesthetic, or 0 for linear.
 	logScale aesMap[int]
 
+	units benchfmt.UnitMetadataMap
+
 	points []point
 }
 
@@ -246,6 +248,10 @@ func (p *Plot) Add(rec *benchfmt.Result) {
 		}
 	}
 	fill(0)
+}
+
+func (p *Plot) SetUnits(units benchfmt.UnitMetadataMap) {
+	p.units = units
 }
 
 func compareKeys(a, b benchproc.Key) int {

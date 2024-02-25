@@ -283,6 +283,7 @@ In addition, any projection may be one of the following:
 	if err := files.Err(); err != nil {
 		return err
 	}
+	pl.SetUnits(files.Units())
 	if nParsed == 0 {
 		return fmt.Errorf("no data")
 	} else if nUnitFiltered == nParsed {

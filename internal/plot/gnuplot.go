@@ -170,10 +170,10 @@ func (p *gnuplotter) onePlot(pts []point) {
 		return
 	}
 
+	var reset strings.Builder
+
 	// Let gnuplot print scientific values on tick marks. This is much nicer
 	// than putting it on the unit.
-	//
-	// TODO: If the unit class is Binary, use %b%B.
 	setFormat := func(axis string, aes Aes) (scale func(float64) float64, label string) {
 		kinds := pointsKinds(pts, aes)
 		// Scale the values. We ask for no rescaling because we'll configure
@@ -186,13 +186,34 @@ func (p *gnuplotter) onePlot(pts []point) {
 			label = "delta " + label
 			// Always include 0.
 			fmt.Fprintf(&p.code, "set %srange [*<0:0<*]\n", axis)
+
+			// If possible, shade better/worse in green/red.
+			//
+			// TODO: It would be more visually representative to just color
+			// between the curve and zero. See https://stackoverflow.com/questions/49874218/gnuplot-fill-area-under-curve-alternatively
+			if aes == AesY && aes == p.dvAes {
+				unitName := pts[0].Get(p.unitAes).key.Get(p.unitField)
+				better := p.units.GetBetter(unitName)
+				pos, neg := "red", "green"
+				if better > 0 {
+					pos, neg = neg, pos
+				}
+				if better != 0 {
+					fmt.Fprintf(&p.code, "set object 1 rectangle from graph 0, first 0 to graph 1, graph 1 back fs transparent solid 0.1 fc '%s' lw 0\n", pos)
+					fmt.Fprintf(&p.code, "set object 2 rectangle from graph 0, graph 0 to graph 1, first 0 back fs transparent solid 0.1 fc '%s' lw 0\n", neg)
+					fmt.Fprintf(&reset, "unset object 1\nunset object 2\n")
+					return
+				}
+			}
 			// Draw a line at 0. The command uses the opposite axis.
 			za := "x"
 			if aes == AesX {
 				za = "y"
 			}
 			fmt.Fprintf(&p.code, "set %szeroaxis dt 2\n", za)
+			fmt.Fprintf(&reset, "unset %szeroaxis\n", za)
 		} else {
+			// TODO: If the unit class is Binary, use %b%B.
 			fmt.Fprintf(&p.code, "set format %s '%%.0s%%c'\n", axis)
 		}
 		return
@@ -257,7 +278,10 @@ func (p *gnuplotter) onePlot(pts []point) {
 	}
 
 	fmt.Fprintf(&p.code, "plot %s\n", strings.Join(plotArgs, ", "))
+
 	p.code.WriteString(data.String())
+
+	p.code.WriteString(reset.String())
 }
 
 // gpString returns s escaped for Gnuplot
