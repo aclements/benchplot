@@ -289,12 +289,12 @@ func (p *gnuplotter) onePlot(pts []point) {
 					if ratioPos == "" {
 						return
 					}
-					plotArg += " with filledcurves below fs transparent solid 0.1 fc '" + ratioPos + "' lw 0"
+					plotArg += " with filledcurves below title '' fs transparent solid 0.1 fc '" + ratioPos + "' lw 0"
 				case layerNeg:
 					if ratioNeg == "" {
 						return
 					}
-					plotArg += " with filledcurves above fs transparent solid 0.1 fc '" + ratioNeg + "' lw 0"
+					plotArg += " with filledcurves above title '' fs transparent solid 0.1 fc '" + ratioNeg + "' lw 0"
 				case layerCenter:
 					plotArg += fmt.Sprintf(" with lp title %s linecolor %d", gpString(color.StringValues()), colorIdx)
 				}
